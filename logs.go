@@ -4,16 +4,16 @@ import "github.com/rs/zerolog"
 
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	zerolog.SetGlobalLevel(DefaultLogLevel)
+	SetLogLevel(DefaultLogLevel)
 }
 
 type logLevel zerolog.Level
 
 const (
-	LogDebug    = zerolog.DebugLevel
-	LogInfo     = zerolog.InfoLevel
-	LogWarn     = zerolog.WarnLevel
-	LogDisabled = zerolog.Disabled
+	LogDebug    = logLevel(zerolog.DebugLevel)
+	LogInfo     = logLevel(zerolog.InfoLevel)
+	LogWarn     = logLevel(zerolog.WarnLevel)
+	LogDisabled = logLevel(zerolog.Disabled)
 )
 
 // SetLogLevel to LogDebug, LogInfo, LogWarn, or LogDisabled
