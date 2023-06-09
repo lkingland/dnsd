@@ -37,7 +37,7 @@ type Syncer struct {
 	TTL        time.Duration // TTL to set for DNS records on update
 	UpdateCh   chan error    // Channel to notify of each update with any errors
 	Reporter   Reporter      // Reporter of current routable IPs
-	Endpoint   string        // API endpoint
+	Endpoint   string        // API endpoint (default is DefaultEndpoint)
 	Resolution time.Duration // How often to check for changes
 
 	lastipv4 string
@@ -126,12 +126,15 @@ func (s *Syncer) sync() (err error) {
 		Int("ttl", int(s.TTL.Seconds())).
 		Msg("syncing")
 
-	// Send patch requests
+	// Send ipv4 patch request
 	if err = s.patch("A", ipv4); err != nil {
 		return
 	}
-	if err = s.patch("AAAA", ipv6); err != nil {
-		return
+	// Send ipv6 patch request if available
+	if ipv6 != "" {
+		if err = s.patch("AAAA", ipv6); err != nil {
+			return
+		}
 	}
 	log.Info().Msg("sync complete")
 	return
@@ -269,7 +272,14 @@ func (s *Syncer) Record() (id, value string, err error) {
 type Reporter func() (ipv4, ipv6 string, err error)
 
 var defaultReporter = func() (ipv4, ipv6 string, err error) {
-	// Get our public IPv4 from ipify.org
+	// TODO: contact another instance of dnsd by default, fallig
+	// back to ipify, ipecho, etc.
+	// When using the fallback, run each concurrently witha  fairly short
+	// timeout. If both come back, compare, but if not just log a notice that
+	// we were unable to do a validation.
+
+	// ipify.org
+	// ---------
 	res, err := http.Get("https://api.ipify.org")
 	if err != nil {
 		return
@@ -282,7 +292,8 @@ var defaultReporter = func() (ipv4, ipv6 string, err error) {
 	}
 	ipv4 = string(bb)
 
-	// Get our public IPv4 from ipecho.net
+	// ipecho.net
+	// ---------
 	res, err = http.Get("https://ipecho.net/plain")
 	if err != nil {
 		return
@@ -293,37 +304,47 @@ var defaultReporter = func() (ipv4, ipv6 string, err error) {
 	}
 	ipv4B := string(bb)
 
-	// Confirm they match
+	// Cross-check
+	// -----------
 	if ipv4 != ipv4B {
 		log.Error().Str("ipify.org", ipv4).Str("ipecho.net", ipv4B).Msg("mismatch in ipv4 reported by third-parties.")
 		err = fmt.Errorf("received to differing ipv4 addresses. %v and %v", ipv4, ipv4B)
 		return
 	}
 
-	// Get our public IPv6 from ipify.org
-	res, err = http.Get("https://api64.ipify.org")
-	if err != nil {
-		return
-	}
-	defer res.Body.Close()
-
-	bb, err = io.ReadAll(res.Body)
-	if err != nil {
-		return
-	}
-	ipv6 = string(bb)
-
-	// Confirm it is the current machine
-	var ipv6ok bool
-	for _, addr := range addresses() {
-		addr = strings.TrimSuffix(addr, "/64") // trim netmask
-		if ipv6 == addr {
-			ipv6ok = true
-			break
+	// TODO: IPv6 address only works when it is the exact server on which
+	// the load-balancer for the cluster is running.  Therefore the following
+	// implementation should only be actively used when running as a sampling
+	// service, and the actual dnsd service should be configured to reach
+	// out to the load-balancer, asking for its IPv6 address.
+	var inSamplerMode = false
+	if inSamplerMode {
+		// Get our public IPv6 from ipify.org
+		res, err = http.Get("https://api64.ipify.org")
+		if err != nil {
+			return
 		}
-	}
-	if !ipv6ok {
-		return "", "", fmt.Errorf("reported ipv6 address %q not present locally", ipv6)
+		defer res.Body.Close()
+
+		bb, err = io.ReadAll(res.Body)
+		if err != nil {
+			return
+		}
+		ipv6 = string(bb)
+
+		// Confirm it is the current machine
+		var ipv6ok bool
+		for _, addr := range addresses() {
+			addr = strings.TrimSuffix(addr, "/64") // trim netmask
+			if ipv6 == addr {
+				ipv6ok = true
+				break
+			}
+		}
+		if !ipv6ok {
+			return "", "", fmt.Errorf("reported ipv6 address %q not present locally", ipv6)
+		}
+
 	}
 
 	log.Debug().Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("addresses found")
