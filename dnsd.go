@@ -31,18 +31,20 @@ const (
 
 // Syncer of a single DNS domain's A and AAAA records.
 type Syncer struct {
+	Endpoint   string        // API endpoint (default is DefaultEndpoint)
 	Zone       string        // Zone. eg example.com
 	Record     string        // Record to update. eg www.example.com
 	Token      string        // Token for accessing the remote API
 	TTL        time.Duration // TTL to set for DNS records on update
+	Resolution time.Duration // How often to check for changes
 	UpdateCh   chan error    // Channel to notify of each update with any errors
 	Reporter   Reporter      // Reporter of current routable IPs
-	Endpoint   string        // API endpoint (default is DefaultEndpoint)
-	Resolution time.Duration // How often to check for changes
 
+	// Cache
 	lastipv4 string
 	lastipv6 string
 	zoneID   string
+	recordID string
 }
 
 func (s *Syncer) Start(ctx context.Context) error {
@@ -51,7 +53,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return errors.New("dnsd syncer requires a token")
 	}
 	if s.Record == "" {
-		return errors.New("dnsd syncer requires a name to sync")
+		return errors.New("dnsd syncer requires a record name to sync")
 	}
 
 	// Defaults
@@ -88,10 +90,254 @@ func (s *Syncer) Start(ctx context.Context) error {
 				log.Info().Msg("syncer canceled")
 				s.onUpdate(ctx.Err())
 			case <-time.After(s.Resolution):
+				// continue
 			}
 		}
 	}()
 	return nil
+}
+
+func (s *Syncer) sync() (err error) {
+	// Get the current IP addresses
+	ipv4, ipv6, err := s.Reporter()
+	if err != nil {
+		return
+	}
+	log.Debug().Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("resolved ips")
+
+	// Return if they have not changed.
+	if ipv4 == s.lastipv4 && ipv6 != s.lastipv6 {
+		log.Debug().Msg("dnsd addresses are current")
+		return nil
+	}
+
+	// log we're commencing update
+	log.Info().
+		Str("zone", s.Zone).
+		Str("record", s.Record).
+		Str("ipv4", ipv4).
+		Str("ipv6", ipv6).
+		Int("ttl", int(s.TTL.Seconds())).
+		Msg("syncing")
+
+	// Update the ipv4 address
+	if err = s.put("A", ipv4); err != nil {
+		return
+	}
+
+	// Update the ipv6 address if found
+	if ipv6 != "" {
+		if err = s.put("AAAA", ipv6); err != nil {
+			return
+		}
+	}
+
+	log.Info().Msg("sync complete")
+	return
+}
+
+// put a record (A|AAAA) with value (IPv4 or IPv6 address, respectively)
+func (s *Syncer) put(key, value string) (err error) {
+	// API Endpoint
+	zoneID, err := s.ZoneID()
+	if err != nil {
+		return
+	}
+	recordID, err := s.RecordID()
+	if err != nil {
+		return
+	}
+	log.Debug().Str("zone", zoneID).Str("record", recordID).Msg("ids retreived")
+
+	endpoint := s.Endpoint + "/zones/" + zoneID + "/dns_records/" + recordID
+
+	// Request Object
+	request := updateRequest{
+		Type:    key,
+		Content: value,
+		Name:    s.Record,
+		TTL:     int(s.TTL.Seconds()),
+	}
+
+	// PUT
+	var body bytes.Buffer
+	if err = json.NewEncoder(&body).Encode(request); err != nil {
+		return
+	}
+	req, err := http.NewRequest("PUT", endpoint, &body)
+	if err != nil {
+		return
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+s.Token)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer res.Body.Close()
+	r := response{}
+	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return
+	}
+	if !r.Success {
+		return ErrRemote{Endpoint: endpoint, Errors: r.Errors}
+	}
+
+	// TODO: parse the rsponse for 200 OK (request) but errors?
+
+	return
+}
+
+func (s *Syncer) zones() []string {
+	url := s.Endpoint + "/zones"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return []string{}
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+s.Token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return []string{}
+	}
+	r := struct {
+		Result []struct {
+			Name string `json:"name"`
+		} `json:"result"`
+	}{}
+	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return []string{}
+	}
+	names := []string{}
+	for _, result := range r.Result {
+		names = append(names, result.Name)
+	}
+	return names
+}
+
+func (s *Syncer) records() []string {
+	zoneID, err := s.ZoneID()
+	if err != nil {
+		return []string{}
+	}
+	url := s.Endpoint + "/zones/" + zoneID + "/dns_records"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return []string{}
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+s.Token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return []string{}
+	}
+	r := struct {
+		Result []struct {
+			Name string `json:"name"`
+		} `json:"result"`
+	}{}
+	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return []string{}
+	}
+	names := []string{}
+	for _, result := range r.Result {
+		names = append(names, result.Name)
+	}
+	return names
+}
+
+// ZoneID returns the ID for the current Syncer's named Zone
+func (s *Syncer) ZoneID() (id string, err error) {
+	if s.zoneID != "" {
+		return s.zoneID, nil // Cache
+	}
+
+	// Build the lookup request
+	endpoint := s.Endpoint + "/zones/?name=" + s.Zone
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+s.Token)
+
+	// Issue the Lookup Request
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer res.Body.Close()
+	r := zoneResponse{}
+	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return
+	}
+	if !r.Success {
+		return "", ErrRemote{Endpoint: endpoint, Errors: r.Errors}
+	}
+
+	// Evaluate the Response
+	if len(r.Result) == 0 {
+		return "", ErrZoneNotFound{
+			Zone:  s.Zone,
+			Zones: s.zones(),
+		}
+	} else if len(r.Result) > 1 {
+		return "", fmt.Errorf("zone ID lookup reutned %v results (expected 1)",
+			len(r.Result))
+	}
+
+	s.zoneID = r.Result[0].ID
+	return s.zoneID, nil
+}
+
+// RecordID returns the ID for the current Syncer's named Record
+func (s *Syncer) RecordID() (id string, err error) {
+	if s.recordID != "" {
+		return s.recordID, nil // Cache
+	}
+
+	// Build the lookup request
+	zoneID, err := s.ZoneID()
+	if err != nil {
+		return
+	}
+	url := s.Endpoint + "/zones/" + zoneID + "/dns_records/?name=" + s.Record
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+s.Token)
+
+	// Issue the Lookup Request
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer res.Body.Close()
+	r := zoneResponse{}
+	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return
+	}
+	if !r.Success {
+		return "", ErrRemote{Errors: r.Errors}
+	}
+
+	// Evaluate the Response
+	if len(r.Result) == 0 {
+		return "", ErrRecordNotFound{
+			Zone:    s.Zone,
+			Record:  s.Record,
+			Records: s.records(),
+		}
+	} else if len(r.Result) > 1 {
+		return "", fmt.Errorf("record lookup returned %v results (expected 1)",
+			len(r.Result))
+	}
+
+	s.recordID = r.Result[0].ID
+	return s.recordID, nil
 }
 
 func (s *Syncer) onUpdate(err error) {
@@ -105,172 +351,10 @@ func (s *Syncer) onUpdate(err error) {
 	}
 }
 
-func (s *Syncer) sync() (err error) {
-	// Get the current IP addresses
-	ipv4, ipv6, err := s.Reporter()
-	if err != nil {
-		return
-	}
-
-	// Return if they have not changed.
-	if ipv4 == s.lastipv4 && ipv6 != s.lastipv6 {
-		log.Debug().Msg("dnsd addresses are current")
-		return nil
-	}
-
-	log.Info().
-		Str("zone", s.Zone).
-		Str("record", s.Record).
-		Str("ipv4", ipv4).
-		Str("ipv6", ipv6).
-		Int("ttl", int(s.TTL.Seconds())).
-		Msg("syncing")
-
-	// Send ipv4 patch request
-	if err = s.patch("A", ipv4); err != nil {
-		return
-	}
-	// Send ipv6 patch request if available
-	if ipv6 != "" {
-		if err = s.patch("AAAA", ipv6); err != nil {
-			return
-		}
-	}
-	log.Info().Msg("sync complete")
-	return
-}
-
-// patch a record (A|AAAA) with value (IPv4 or IPv6 address, respectively)
-func (s *Syncer) patch(record, value string) (err error) {
-	zoneID, err := s.ZoneID()
-	if err != nil {
-		return
-	}
-
-	/*
-		recordID, recordValue := Record()
-		if err != nil {
-			return
-		}
-		log.Info().Str("value", recordValue).Str("id", recordID).Msg("current value")
-	*/
-
-	var requestBody bytes.Buffer
-	err = json.NewEncoder(&requestBody).Encode(struct {
-		Type    string `json:"type"`
-		Content string `json:"content"`
-		Name    string `json:"name"`
-		TTL     int    `json:"ttl"`
-	}{record, value, s.Record, int(s.TTL.Seconds())})
-	if err != nil {
-		return
-	}
-
-	url := s.Endpoint + "/zones/" + zoneID + "/dns_records"
-	req, err := http.NewRequest("PATCH", url, &requestBody)
-	if err != nil {
-		return
-	}
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Authorization", "Bearer "+s.Token)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return
-	}
-
-	if res.StatusCode != 200 {
-		body, err := io.ReadAll(res.Body)
-		if err != nil {
-			return err
-		}
-		log.Error().Str("response", string(body)).Int("code", res.StatusCode).
-			Msg("unexpected return status from patch request (200 expected)")
-	}
-	return
-}
-
-func (s *Syncer) ZoneID() (id string, err error) {
-	if s.zoneID != "" {
-		return s.zoneID, nil
-	}
-
-	url := s.Endpoint + "/zones/?name=" + s.Zone
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return
-	}
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Authorization", "Bearer "+s.Token)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return
-	}
-
-	r := struct {
-		Result []struct {
-			ID string `json:"id"`
-		} `json:"result"`
-	}{}
-	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
-		return
-	}
-
-	if len(r.Result) != 1 {
-		return "", fmt.Errorf("zone ID lookup returned %v results (expected 1)",
-			len(r.Result))
-	}
-
-	s.zoneID = r.Result[0].ID
-	return s.zoneID, nil
-}
-
-/*
-func (s *Syncer) Record() (id, value string, err error) {
-	if s.recordID != "" && s.recordValue != "" {
-		return s.recordID, s.recordValue
-	}
-
-	zoneID, err := s.zoneID
-	if err != nil {
-		return
-	}
-
-	url := s.Endpoint + "/zones/" + zoneID + "/dns_records/?name=" + s.Name
-
-	req, err := http.NewRequest("GET", url)
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Authorization", "Bearer "+s.Token)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return
-	}
-
-	r := struct {
-		Result []struct {
-			ID      string `json:"id"`
-			Name    string `json:"name"`
-			Content string `json:"content"`
-		} `json:"result"`
-	}{}
-	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
-		return
-	}
-
-	if len(data.Result) != 1 {
-		return "", fmt.Errorf("zone dns lookup returned %v results (expected 1)",
-			len(data.Result))
-	}
-
-	s.recordID = data.Result[0].ID
-	s.recordValue = data.Result[0].Content
-
-	return s.recordID, s.recordValue, nil
-}
-*/
-
+// Reporter of IP addresses
 type Reporter func() (ipv4, ipv6 string, err error)
 
+// defaultReporter uses ipify.org and ipecho.net
 var defaultReporter = func() (ipv4, ipv6 string, err error) {
 	// TODO: contact another instance of dnsd by default, fallig
 	// back to ipify, ipecho, etc.
@@ -371,4 +455,84 @@ func addresses() (ips []string) {
 		}
 	}
 	return
+}
+
+// Requests
+// --------
+
+type updateRequest struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
+	Name    string `json:"name"`
+	TTL     int    `json:"ttl"`
+}
+
+// Responses
+// ---------
+
+type response struct {
+	Success bool `json:"success"`
+	Errors  []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+type zoneResponse struct {
+	response
+	Result []struct {
+		ID string `json:"id"`
+	} `json:"result"`
+}
+
+// Errors
+// ------
+
+type ErrRemote struct {
+	Endpoint string
+	Errors   []struct {
+		Message string `json:"message"`
+	}
+}
+
+func (e ErrRemote) Error() string {
+	s := strings.Builder{}
+	s.WriteString(fmt.Sprintf("endpoint %q returned errors:", e.Endpoint))
+	ee := []string{}
+	for _, e := range e.Errors {
+		ee = append(ee, e.Message)
+	}
+	s.WriteString(strings.Join(ee, ". "))
+	return s.String()
+}
+
+type ErrZoneNotFound struct {
+	Zone  string
+	Zones []string
+}
+
+func (e ErrZoneNotFound) Error() string {
+	s := strings.Builder{}
+	s.WriteString("zone not found: ")
+	s.WriteString(e.Zone)
+	s.WriteString(".  Available zones:")
+	for _, z := range e.Zones {
+		s.WriteString("\n  " + z)
+	}
+	return s.String()
+}
+
+type ErrRecordNotFound struct {
+	Zone    string
+	Record  string
+	Records []string
+}
+
+func (e ErrRecordNotFound) Error() string {
+	s := strings.Builder{}
+	s.WriteString(fmt.Sprintf("record %v not found for zone %v.  Available records: ",
+		e.Record, e.Zone))
+	for _, z := range e.Records {
+		s.WriteString("\n  " + z)
+	}
+	return s.String()
 }

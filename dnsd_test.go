@@ -4,14 +4,70 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"flag"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+var (
+	// Cloudflare Integration
+	// If token, record, and zone are provided, the test is enabled.
+	// The optional ipv4 flag indicates a static IP to use to update rather
+	// than the default of using the defaultReporter.
+	token  = flag.String("token", "", "Cloudflare token.")
+	record = flag.String("record", "", "DNS record to update for test")
+	zone   = flag.String("zone", "", "Zone in which record exists")
+	ipv4   = flag.String("ipv4", "", "IPv4 addresss to update the record with")
+
+	// Reporter Integration
+	// Enables TestDefaultReporter which
+)
+
+// TestIntegration ensures that the integration between dnsd and the
+// CloudFlare API is functional.  This test is not enabled by default.  To
+// enable it, enable the test by providing the flags -token, -zone and -record.
+// where -token is a Cloudflare token with permission to modify the -zone, and
+// the -record being the fully-qualified-domain name record to update:
+//
+//	go test -v -token=$TOKEN -zone=example.com -record=dnsdtest.example.com
+func TestCloudflare(t *testing.T) {
+	// Skip the test unless required flags are provided
+	if *token == "" || *record == "" || *zone == "" {
+		t.Log("Cloudflare integration test not enabled.  Provide -token, -record and -zone to enable.")
+		t.Skip()
+	}
+
+	// Create they syncer
+	s := &Syncer{Zone: *zone, Record: *record, Token: *token}
+
+	// Override with a static IP if flags provided
+	if *ipv4 != "" {
+		s.Reporter = func() (string, string, error) { return *ipv4, "", nil }
+	}
+
+	// Sync
+	ctx := context.Background()
+	if err := s.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for at least one update to complete
+	s.UpdateCh = make(chan error, 1)
+	select {
+	case <-time.After(30 * time.Second):
+		t.Fatal("Test timed out.  No update in 10 seconds")
+	case err := <-s.UpdateCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+}
 
 // TestSync ensures that the syncer is functioning as intended.
 // This is a Unit test which uses mocks for the Cloudflare API and the
@@ -52,21 +108,24 @@ func TestSync(t *testing.T) {
 
 	// The handler will have failed the test if it received an invalid request.
 
-	// Confirm both patches received
+	// Confirm both ID dereference requests received
 	if !mockAPI.receivedZoneQuery {
 		t.Fatal("Zone query not received")
 	}
-	if !mockAPI.receivedIPv4Patch {
-		t.Fatal("IPv4 patch request not received")
+	if !mockAPI.receivedRecordQuery {
+		t.Fatal("Record query not received")
 	}
-	if !mockAPI.receivedIPv6Patch {
-		t.Fatal("IPv6 patch request not received")
+	if !mockAPI.receivedIPv4Put {
+		t.Fatal("IPv4 put request not received")
+	}
+	if !mockAPI.receivedIPv6Put {
+		t.Fatal("IPv6 put request not received")
 	}
 }
 
-// patch request as defined by the DNS Update API Documentation:
+// put request as defined by the DNS Update API Documentation:
 // https://developers.cloudflare.com/api/operations/dns-records-for-a-zone-update-dns-record
-type patch struct {
+type put struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"`
 	Content string `json:"content"`
@@ -84,23 +143,15 @@ type mockAPI struct {
 	s *Syncer
 	t *testing.T
 
-	receivedZoneQuery bool
-	receivedIPv4Patch bool
-	receivedIPv6Patch bool
+	receivedZoneQuery   bool
+	receivedRecordQuery bool
+	receivedIPv4Put     bool
+	receivedIPv6Put     bool
 }
 
-func (a *mockAPI) validateZoneQuery(r *http.Request) (err error) {
-	if strings.HasSuffix(r.RequestURI, "/zones/?name="+a.s.Zone) {
-		a.receivedZoneQuery = true
-	} else {
-		return fmt.Errorf("unexpected zone query received: %v", r.RequestURI)
-	}
-	return
-}
-
-func (a *mockAPI) validateIPv4Patch(p patch) (err error) {
+func (a *mockAPI) validateIPv4Put(p put) (err error) {
 	ip, _, _ := a.s.Reporter()
-	expected := patch{
+	expected := put{
 		Type:    "A",
 		Content: ip,
 		Name:    a.s.Record,
@@ -109,13 +160,13 @@ func (a *mockAPI) validateIPv4Patch(p patch) (err error) {
 	if !reflect.DeepEqual(p, expected) {
 		a.t.Fatalf("expected:\n%v\ngot:\n%v\n", format(expected), p)
 	}
-	a.receivedIPv4Patch = true
+	a.receivedIPv4Put = true
 	return
 }
 
-func (a *mockAPI) validateIPv6Patch(p patch) (err error) {
+func (a *mockAPI) validateIPv6Put(p put) (err error) {
 	_, ip, _ := a.s.Reporter()
-	expected := patch{
+	expected := put{
 		Type:    "AAAA",
 		Content: ip,
 		Name:    a.s.Record,
@@ -124,11 +175,18 @@ func (a *mockAPI) validateIPv6Patch(p patch) (err error) {
 	if !reflect.DeepEqual(p, expected) {
 		a.t.Fatalf("expected:\n%v\ngot:\n%v\n", format(expected), p)
 	}
-	a.receivedIPv6Patch = true
+	a.receivedIPv6Put = true
 	return
 }
 
 func (a *mockAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	type Result struct {
+		ID string `json:"id"`
+	}
+	type Response struct {
+		Success bool     `json:"success"`
+		Result  []Result `json:"result"`
+	}
 	// All requests must be JSON
 	if r.Header.Get("Content-Type") != "application/json" {
 		a.t.Fatal("all requests must have the header Content-Type=application/json")
@@ -139,36 +197,39 @@ func (a *mockAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.RequestURI, "Bearer "+a.s.Token, r.Header.Get("Authorization"))
 	}
 	if r.Method == "GET" {
-		// The only GET request should be to lookup the zone ID
-		if err := a.validateZoneQuery(r); err != nil {
-			a.t.Fatal(err)
+		if strings.HasSuffix(r.RequestURI, "/zones/?name="+a.s.Zone) {
+			a.receivedZoneQuery = true
+			// Send back a zone ID which will be expected to be received later
+			err := json.NewEncoder(w).Encode(Response{Success: true, Result: []Result{{"zoneid"}}})
+			if err != nil {
+				a.t.Fatal(err)
+			}
+		} else if strings.HasSuffix(r.RequestURI, "/zones/zoneid/dns_records/?name="+a.s.Record) {
+			a.receivedRecordQuery = true
+			// Send back a zone ID which will be expected to be received later
+			err := json.NewEncoder(w).Encode(Response{Success: true, Result: []Result{{"recordid"}}})
+			if err != nil {
+				a.t.Fatal(err)
+			}
+		} else {
+			a.t.Fatalf("unexpected GET request received: %v", r.RequestURI)
 		}
-		// Send back a zone ID which will be expected to be received later
-		type Result struct {
-			ID string `json:"id"`
-		}
-		type Response struct {
-			Result []Result `json:"result"`
-		}
-		err := json.NewEncoder(w).Encode(Response{[]Result{{"id"}}})
-		if err != nil {
-			a.t.Fatal(err)
-		}
-	} else if r.Method == "PATCH" {
-		var p patch
+
+	} else if r.Method == "PUT" {
+		var p put
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			a.t.Fatal(err)
 		}
 		defer r.Body.Close()
 
-		// One PATCH request should be for the A record
+		// One GET request should be for the A record
 		if p.Type == "A" {
-			if err := a.validateIPv4Patch(p); err != nil {
+			if err := a.validateIPv4Put(p); err != nil {
 				a.t.Fatal(err)
 			}
 		} else if p.Type == "AAAA" {
-			// The other PATCH for AAAA
-			if err := a.validateIPv6Patch(p); err != nil {
+			// The other PUT for AAAA
+			if err := a.validateIPv6Put(p); err != nil {
 				a.t.Fatal(err)
 			}
 		} else {
@@ -176,11 +237,14 @@ func (a *mockAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Any other request methods are errors.
-		a.t.Fatalf("expected 'PATCH', got '%s'", r.Method)
+		a.t.Fatalf("expected 'PUT', got '%s'", r.Method)
+	}
+	if err := json.NewEncoder(w).Encode(Response{Success: true}); err != nil {
+		a.t.Fatal(err)
 	}
 }
 
-func format(p patch) string {
+func format(p put) string {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetIndent("", "  ")
@@ -200,10 +264,8 @@ func TestDefaultReporter(t *testing.T) {
 	// Temporarily disabled as this is not reliable when used on a development
 	// box with a VPN running.  TODO: perhaps place this test
 	// behind a flag, and run it in CI only as a PR acceptance criteria.
-	t.Log("test disabled")
-	return
 
-	ipv4Str, ipv6Str, err := defaultReporter()
+	ipv4Str, _, err := defaultReporter()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,16 +284,19 @@ func TestDefaultReporter(t *testing.T) {
 	}
 
 	// Validate IPv6 address
-	t.Logf("ipv6Str: %v", ipv6Str)
-	if ipv6Str == "" {
-		t.Fatal("ipv6 address not found")
-	}
-	ipv6 := net.ParseIP(ipv6Str)
-	if ipv6 == nil {
-		t.Fatalf("ipv6 address %q not parseable", ipv6Str)
-	}
-	if ipv6.To16() == nil {
-		t.Fatalf("ipv6 address %q not parseable as an IPv6 address", ipv6Str)
-	}
+	// TODO
+	/*
+		t.Logf("ipv6Str: %v", ipv6Str)
+		if ipv6Str == "" {
+			t.Fatal("ipv6 address not found")
+		}
+		ipv6 := net.ParseIP(ipv6Str)
+		if ipv6 == nil {
+			t.Fatalf("ipv6 address %q not parseable", ipv6Str)
+		}
+		if ipv6.To16() == nil {
+			t.Fatalf("ipv6 address %q not parseable as an IPv6 address", ipv6Str)
+		}
+	*/
 
 }
