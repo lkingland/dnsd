@@ -106,7 +106,7 @@ func (s *Syncer) sync() (err error) {
 	log.Debug().Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("resolved ips")
 
 	// Return if they have not changed.
-	if ipv4 == s.lastipv4 && ipv6 != s.lastipv6 {
+	if ipv4 == s.lastipv4 && ipv6 == s.lastipv6 {
 		log.Debug().Msg("dnsd addresses are current")
 		return nil
 	}
