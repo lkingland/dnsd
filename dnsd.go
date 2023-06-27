@@ -31,14 +31,14 @@ const (
 
 // Syncer of a single DNS domain's A and AAAA records.
 type Syncer struct {
-	Endpoint   string        // API endpoint (default is DefaultEndpoint)
-	Zone       string        // Zone. eg example.com
-	Record     string        // Record to update. eg www.example.com
-	Token      string        // Token for accessing the remote API
-	TTL        time.Duration // TTL to set for DNS records on update
-	Resolution time.Duration // How often to check for changes
-	UpdateCh   chan error    // Channel to notify of each update with any errors
-	Reporter   Reporter      // Reporter of current routable IPs
+	Zone       string        // Zone. eg example.com (required)
+	Record     string        // Record to update. eg www.example.com (required)
+	Token      string        // Token for accessing the remote API (required)
+	Endpoint   string        // API endpoint (defaults to DefaultEndpoint)
+	TTL        time.Duration // TTL to set for DNS records on update (defaults to DefaultTTL)
+	Resolution time.Duration // How often to check for changes (defaults to DefaultResolution)
+	UpdateCh   chan error    // Channel to notify of each update with any errors (optional)
+	Reporter   Reporter      // Optionally override the reporter which fetches IPs.
 
 	// Cache
 	lastipv4 string
@@ -47,6 +47,7 @@ type Syncer struct {
 	recordID string
 }
 
+// Start the syncer.
 func (s *Syncer) Start(ctx context.Context) error {
 	// Preconditions
 	if s.Token == "" {
