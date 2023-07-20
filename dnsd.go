@@ -39,6 +39,7 @@ type Syncer struct {
 	Resolution time.Duration // How often to check for changes (defaults to DefaultResolution)
 	UpdateCh   chan error    // Channel to notify of each update with any errors (optional)
 	Reporter   Reporter      // Optionally override the reporter which fetches IPs.
+	NoProxy    bool          // Disable CloudFlare proxy (exposes source IP)
 
 	// Cache
 	lastipv4 string
@@ -157,7 +158,7 @@ func (s *Syncer) put(key, value string) (err error) {
 		Type:    key,
 		Content: value,
 		Name:    s.Record,
-		Proxied: true,
+		Proxied: (!s.NoProxy),
 		TTL:     int(s.TTL.Seconds()),
 	}
 
