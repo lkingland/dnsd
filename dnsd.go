@@ -157,6 +157,7 @@ func (s *Syncer) put(key, value string) (err error) {
 		Type:    key,
 		Content: value,
 		Name:    s.Record,
+		Proxied: true,
 		TTL:     int(s.TTL.Seconds()),
 	}
 
@@ -466,6 +467,7 @@ type updateRequest struct {
 	Content string `json:"content"`
 	Name    string `json:"name"`
 	TTL     int    `json:"ttl"`
+	Proxied bool   `json:"proxied"`
 }
 
 // Responses
