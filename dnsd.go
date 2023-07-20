@@ -163,6 +163,14 @@ func (s *Syncer) put(key, value string) (err error) {
 	}
 
 	// PUT
+	log.Debug().
+		Str("type", request.Type).
+		Str("content", request.Content).
+		Str("name", request.Name).
+		Bool("proxied", request.Proxied).
+		Int("TTL", request.TTL).
+		Msg("updating")
+
 	var body bytes.Buffer
 	if err = json.NewEncoder(&body).Encode(request); err != nil {
 		return
