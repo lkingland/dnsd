@@ -50,6 +50,8 @@ type Syncer struct {
 
 // Start the syncer.
 func (s *Syncer) Start(ctx context.Context) error {
+	log.Debug().Str("record", s.Record).Msg("starting")
+
 	// Preconditions
 	if s.Token == "" {
 		return errors.New("dnsd syncer requires a token")
