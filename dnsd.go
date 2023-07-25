@@ -116,7 +116,7 @@ func (s *Syncer) sync() (err error) {
 	}
 
 	// log we're commencing update
-	log.Info().
+	log.Debug().
 		Str("zone", s.Zone).
 		Str("record", s.Record).
 		Str("ipv4", ipv4).
@@ -136,7 +136,13 @@ func (s *Syncer) sync() (err error) {
 		}
 	}
 
-	log.Info().Msg("sync complete")
+	log.Info().
+		Str("zone", s.Zone).
+		Str("record", s.Record).
+		Str("ipv4", ipv4).
+		Str("ipv6", ipv6).
+		Int("ttl", int(s.TTL.Seconds())).
+		Msg("synced")
 	return
 }
 
@@ -443,8 +449,6 @@ var defaultReporter = func() (ipv4, ipv6 string, err error) {
 		}
 
 	}
-
-	log.Debug().Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("addresses found")
 
 	return
 }
