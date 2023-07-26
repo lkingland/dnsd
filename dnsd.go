@@ -111,7 +111,7 @@ func (s *Syncer) sync() (err error) {
 
 	// Return if they have not changed.
 	if ipv4 == s.lastipv4 && ipv6 == s.lastipv6 {
-		log.Debug().Msg("dnsd addresses are current")
+		log.Debug().Msg("current")
 		return nil
 	}
 
@@ -135,6 +135,9 @@ func (s *Syncer) sync() (err error) {
 			return
 		}
 	}
+
+	s.lastipv4 = ipv4
+	s.lastipv6 = ipv6
 
 	log.Info().
 		Str("zone", s.Zone).
