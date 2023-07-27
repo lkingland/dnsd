@@ -91,7 +91,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 			select {
 			case <-ctx.Done():
-				log.Info().Msg("syncer canceled")
+				log.Info().Str("record", s.Record).Msg("syncer canceled")
 				s.onUpdate(ctx.Err())
 			case <-time.After(s.Resolution):
 				// continue
@@ -107,18 +107,18 @@ func (s *Syncer) sync() (err error) {
 	if err != nil {
 		return
 	}
-	log.Debug().Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("resolved ips")
+	log.Debug().Str("record", s.Record).Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("resolved ips")
 
 	// Return if they have not changed.
 	if ipv4 == s.lastipv4 && ipv6 == s.lastipv6 {
-		log.Debug().Msg("current")
+		log.Debug().Str("record", s.Record).Msg("current")
 		return nil
 	}
 
 	// log we're commencing update
 	log.Debug().
-		Str("zone", s.Zone).
 		Str("record", s.Record).
+		Str("zone", s.Zone).
 		Str("ipv4", ipv4).
 		Str("ipv6", ipv6).
 		Int("ttl", int(s.TTL.Seconds())).
@@ -140,8 +140,8 @@ func (s *Syncer) sync() (err error) {
 	s.lastipv6 = ipv6
 
 	log.Info().
-		Str("zone", s.Zone).
 		Str("record", s.Record).
+		Str("zone", s.Zone).
 		Str("ipv4", ipv4).
 		Str("ipv6", ipv6).
 		Int("ttl", int(s.TTL.Seconds())).
@@ -160,7 +160,10 @@ func (s *Syncer) put(key, value string) (err error) {
 	if err != nil {
 		return
 	}
-	log.Debug().Str("zone", zoneID).Str("record", recordID).Msg("ids retreived")
+	log.Debug().
+		Str("record", recordID).
+		Str("zone", zoneID).
+		Msg("ids retreived")
 
 	endpoint := s.Endpoint + "/zones/" + zoneID + "/dns_records/" + recordID
 
@@ -175,6 +178,7 @@ func (s *Syncer) put(key, value string) (err error) {
 
 	// PUT
 	log.Debug().
+		Str("record", s.Record).
 		Str("type", request.Type).
 		Str("content", request.Content).
 		Str("name", request.Name).
@@ -305,7 +309,7 @@ func (s *Syncer) ZoneID() (id string, err error) {
 			Zones: s.zones(),
 		}
 	} else if len(r.Result) > 1 {
-		return "", fmt.Errorf("zone ID lookup reutned %v results (expected 1)",
+		return "", fmt.Errorf("zone ID lookup returned %v results (expected 1)",
 			len(r.Result))
 	}
 
@@ -369,7 +373,7 @@ func (s *Syncer) onUpdate(err error) {
 	}
 	// Print to log
 	if err != nil {
-		log.Error().Err(err).Msg("sync error")
+		log.Error().Str("record", s.Record).Err(err).Msg("sync error")
 	}
 }
 
