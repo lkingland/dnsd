@@ -30,8 +30,9 @@ var (
 
 // TestIntegration ensures that the integration between dnsd and the
 // CloudFlare API is functional.  This test is not enabled by default.  To
-// enable it, enable the test by providing the flags -token, -zone and -record.
-// where -token is a Cloudflare token with permission to modify the -zone, and
+// enable it, provide the flags -token, -zone and -record.
+//
+// -token is a Cloudflare token with permission to modify the -zone, and
 // the -record being the fully-qualified-domain name record to update:
 //
 //	go test -v -token=$TOKEN -zone=example.com -record=dnsdtest.example.com
@@ -181,7 +182,8 @@ func (a *mockAPI) validateIPv6Put(p put) (err error) {
 
 func (a *mockAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	type Result struct {
-		ID string `json:"id"`
+		ID   string `json:"id"`
+		Type string `json:"type"`
 	}
 	type Response struct {
 		Success bool     `json:"success"`
@@ -200,14 +202,14 @@ func (a *mockAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.RequestURI, "/zones/?name="+a.s.Zone) {
 			a.receivedZoneQuery = true
 			// Send back a zone ID which will be expected to be received later
-			err := json.NewEncoder(w).Encode(Response{Success: true, Result: []Result{{"zoneid"}}})
+			err := json.NewEncoder(w).Encode(Response{Success: true, Result: []Result{{ID: "zoneid"}}})
 			if err != nil {
 				a.t.Fatal(err)
 			}
 		} else if strings.HasSuffix(r.RequestURI, "/zones/zoneid/dns_records/?name="+a.s.Record) {
 			a.receivedRecordQuery = true
 			// Send back a zone ID which will be expected to be received later
-			err := json.NewEncoder(w).Encode(Response{Success: true, Result: []Result{{"recordid"}}})
+			err := json.NewEncoder(w).Encode(Response{Success: true, Result: []Result{{ID: "recordid", Type: "A"}}})
 			if err != nil {
 				a.t.Fatal(err)
 			}

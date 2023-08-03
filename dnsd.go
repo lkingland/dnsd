@@ -45,7 +45,6 @@ type Syncer struct {
 	lastipv4 string
 	lastipv6 string
 	zoneID   string
-	recordID string
 }
 
 // Start the syncer.
@@ -107,7 +106,7 @@ func (s *Syncer) sync() (err error) {
 	if err != nil {
 		return
 	}
-	log.Debug().Str("record", s.Record).Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("resolved ips")
+	log.Debug().Str("record", s.Record).Str("ipv4", ipv4).Str("ipv6", ipv6).Msg("fetched")
 
 	// Return if they have not changed.
 	if ipv4 == s.lastipv4 && ipv6 == s.lastipv6 {
@@ -156,16 +155,16 @@ func (s *Syncer) put(key, value string) (err error) {
 	if err != nil {
 		return
 	}
-	recordID, err := s.RecordID()
+	recordIDA, err := s.RecordID("A")
 	if err != nil {
 		return
 	}
 	log.Debug().
-		Str("record", recordID).
+		Str("id-a", recordIDA).
 		Str("zone", zoneID).
 		Msg("ids retreived")
 
-	endpoint := s.Endpoint + "/zones/" + zoneID + "/dns_records/" + recordID
+	endpoint := s.Endpoint + "/zones/" + zoneID + "/dns_records/" + recordIDA
 
 	// Request Object
 	request := updateRequest{
@@ -317,12 +316,9 @@ func (s *Syncer) ZoneID() (id string, err error) {
 	return s.zoneID, nil
 }
 
-// RecordID returns the ID for the current Syncer's named Record
-func (s *Syncer) RecordID() (id string, err error) {
-	if s.recordID != "" {
-		return s.recordID, nil // Cache
-	}
-
+// RecordID returns the ID for the current Syncer's named Record of type
+// (A or AAAA)
+func (s *Syncer) RecordID(typ string) (id string, err error) {
 	// Build the lookup request
 	zoneID, err := s.ZoneID()
 	if err != nil {
@@ -342,7 +338,7 @@ func (s *Syncer) RecordID() (id string, err error) {
 		return
 	}
 	defer res.Body.Close()
-	r := zoneResponse{}
+	r := recordResponse{}
 	if err = json.NewDecoder(res.Body).Decode(&r); err != nil {
 		return
 	}
@@ -357,13 +353,14 @@ func (s *Syncer) RecordID() (id string, err error) {
 			Record:  s.Record,
 			Records: s.records(),
 		}
-	} else if len(r.Result) > 1 {
-		return "", fmt.Errorf("record lookup returned %v results (expected 1)",
-			len(r.Result))
 	}
+	for _, v := range r.Result {
+		if v.Type == typ {
+			return v.ID, nil
+		}
+	}
+	return "", fmt.Errorf("record lookup returned %v results, but none of type %v", len(r.Result), typ)
 
-	s.recordID = r.Result[0].ID
-	return s.recordID, nil
 }
 
 func (s *Syncer) onUpdate(err error) {
@@ -506,6 +503,14 @@ type zoneResponse struct {
 	response
 	Result []struct {
 		ID string `json:"id"`
+	} `json:"result"`
+}
+
+type recordResponse struct {
+	response
+	Result []struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
 	} `json:"result"`
 }
 
